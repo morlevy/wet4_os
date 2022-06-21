@@ -9,7 +9,7 @@
 typedef struct malloc_meta_data{
     size_t size;
     bool is_free;
-    void* pointer;
+    //void* pointer; //dropped
     malloc_meta_data* next;
     malloc_meta_data* prev;
 }*MallocMetadata;
@@ -26,7 +26,8 @@ MallocMetadata findMetaData(void* p){
     MallocMetadata found = nullptr;
 
     while(current != nullptr){ //finding the right metadata
-        if (current->pointer == p){
+        void* pointer = (void*) ((size_t)current + sizeof(malloc_meta_data));
+        if (pointer == p){
             found = current;
             break;
         }
@@ -57,10 +58,10 @@ void* smalloc(size_t size) {
         free_space->is_free = false;
         number_of_free_blocks--;
         number_of_free_bytes -= free_space->size;
-        return free_space;
+        return (void*) (size_t(free_space)+ sizeof(malloc_meta_data));
     }
 
-    void* alloc_space = sbrk(sizeof(MallocMetadata) + size);
+    void* alloc_space = sbrk(sizeof(malloc_meta_data) + size);
     if ( alloc_space == (void*) -1) {
         return nullptr;
     }
@@ -68,7 +69,7 @@ void* smalloc(size_t size) {
     void* pointer = (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
     metadata->size = size;
     metadata->is_free = false;
-    metadata->pointer = pointer;
+    //metadata->pointer = pointer;
     metadata->next = nullptr;
     metadata->prev = nullptr;
     number_of_allocated_blocks++;
@@ -119,8 +120,8 @@ void* srealloc(void* oldp, size_t size){
     }
 
     MallocMetadata old = findMetaData(oldp);
-    if (old->size <= size){
-        old->size = size;
+    if (old->size >= size){
+        //old->size = size; //not sure about this line :: memory loss
         return oldp;
     }
 
