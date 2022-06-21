@@ -16,25 +16,63 @@ typedef struct malloc_meta_data{
 
 MallocMetadata first = nullptr;
 MallocMetadata last = nullptr;
+int number_of_free_blocks = 0;
+int number_of_free_bytes = 0;
+int number_of_allocated_blocks = 0;
+int number_of_allocated_bytes = 0;
 
+MallocMetadata findMetaData(void* p){
+    MallocMetadata current = first;
+    MallocMetadata found = nullptr;
 
+    while(current != nullptr){ //finding the right metadata
+        if (current->pointer == p){
+            found = current;
+            break;
+        }
+        current = current->next;
+    }
+
+    return found;
+}
+
+MallocMetadata findFreeSpace(size_t size){
+    MallocMetadata current = first;
+
+    while(current != nullptr){ //finding the right metadata
+        if (current->is_free && current->size >= size){
+            return current;
+        }
+        current = current->next;
+    }
+    return nullptr;
+}
 
 void* smalloc(size_t size) {
     if(size == 0 || size > 100000000){
         return nullptr;
+    }
+    MallocMetadata free_space = findFreeSpace(size);
+    if(free_space != nullptr){
+        free_space->is_free = false;
+        number_of_free_blocks--;
+        number_of_free_bytes -= free_space->size;
+        return free_space;
     }
 
     void* alloc_space = sbrk(sizeof(MallocMetadata) + size);
     if ( alloc_space == (void*) -1) {
         return nullptr;
     }
-    MallocMetadata metadata = static_cast<MallocMetadata>(alloc_space);
+    MallocMetadata metadata = MallocMetadata(alloc_space);
     void* pointer = (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
     metadata->size = size;
     metadata->is_free = false;
     metadata->pointer = pointer;
     metadata->next = nullptr;
     metadata->prev = nullptr;
+    number_of_allocated_blocks++;
+    number_of_allocated_bytes += size;
 
     if(first == nullptr){ //update next and prev
         first = metadata;
@@ -62,22 +100,59 @@ void sfree(void *p){
         return;
     }
 
-    MallocMetadata current = first;
-    MallocMetadata found = nullptr;
-    while(current != nullptr){
-        if (current->pointer == p){
-            found = current;
-            break;
-        }
-        current = current->next;
-    }
+    MallocMetadata found = findMetaData(p);
 
     if(found != nullptr){
         found->is_free = true;
-
+        number_of_free_blocks++;
+        number_of_free_bytes += found->size;
     }
 }
 
 void* srealloc(void* oldp, size_t size){
+    if (size == 0 || size > 100000000){
+        return nullptr;
+    }
 
+    if(oldp == nullptr){
+        return smalloc(size);
+    }
+
+    MallocMetadata old = findMetaData(oldp);
+    if (old->size <= size){
+        old->size = size;
+        return oldp;
+    }
+
+    void* new_p = smalloc(size);
+    if(new_p != nullptr){
+        memcpy(new_p,oldp,old->size);
+        sfree(oldp);
+    }
+    return new_p;
 }
+
+size_t _num_free_blocks(){
+    return number_of_free_blocks;
+}
+
+size_t _num_free_bytes(){
+    return number_of_free_bytes;
+}
+
+size_t _num_allocated_blocks(){
+    return number_of_allocated_blocks;
+}
+
+size_t  _num_allocated_bytes(){
+    return number_of_allocated_bytes;
+}
+
+size_t _num_meta_data_bytes(){
+    return number_of_allocated_blocks * sizeof(malloc_meta_data);
+}
+
+size_t _size_meta_data(){
+    return sizeof(malloc_meta_data);
+}
+
