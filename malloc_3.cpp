@@ -57,26 +57,26 @@ MallocMetadata findFreeSpace(size_t size){
 void _insertFree(MallocMetadata metadata)
 {
     if(first_free == nullptr){ //update next and prev
-        first = metadata;
-        last = metadata;
+        first_free = metadata;
+        last_free = metadata;
     } else {
-        MallocMetadata temp = first;
+        MallocMetadata temp = first_free;
         while (temp) //checking if we can insert it sorted
         {
             if (temp->size > metadata->size) //we only insert if the next node has a bigger size/
             {
-                temp->prev->next = metadata;
-                metadata->next = temp;
-                metadata->prev = temp->prev;
-                temp->prev = metadata;
+                temp->prev_free->next_free = metadata;
+                metadata->next_free = temp;
+                metadata->prev_free = temp->prev_free;
+                temp->prev_free = metadata;
                 break;
             }
         }
-        if (!(metadata->next)) //if it should be last by size and address
+        if (!(metadata->next_free)) //if it should be last by size and address.
         {
-            metadata->prev = last;
-            last->next = metadata;
-            last = metadata;
+            metadata->prev_free = last_free;
+            last_free->next_free = metadata;
+            last_free = metadata;
         }
     }
 }
@@ -91,7 +91,10 @@ MallocMetadata _splitBlock(MallocMetadata freeBlock, size_t size)
 
     result = (size_t)freeBlock + sizeof(malloc_meta_data) + size; //getting the start of the other part of the block
     result->size = freeBlock->size - size - sizeof(malloc_meta_data); //result->size MUST be larger than 128!
-
+    result->next = nullptr;
+    result->prev = nullptr;
+    result->next_free = nullptr;
+    result->prev_free = nullptr;
     return result;
 }
 
@@ -100,10 +103,18 @@ void _disconnectFreeMetaNode(MallocMetadata metadata)
 {
     if (!metadata)
         return;
-    if (metadata == first_free)
-        first_free = metadata->next_free ? metadata->next_free : metadata;
-    if (metadata == last_free)
-        last_free = metadata->prev_free ? metadata->prev_free : metadata;
+    if (metadata == first_free || metadata == last_free)
+    {
+        if (metadata == first_free)
+            first_free = metadata->next_free ? metadata->next_free : nullptr;
+        if (metadata == last_free)
+            last_free = metadata->prev_free ? metadata->prev_free : nullptr;
+    }
+    else
+    {
+        metadata->prev_free->next_free = metadata->next_free;
+        metadata->next_free->prev_free = metadata->prev_free;
+    }
 }
 
 void* smalloc(size_t size) {
@@ -117,7 +128,7 @@ void* smalloc(size_t size) {
         {
             _disconnectFreeMetaNode(free_space);
             _insertFree(leftover);
-            //leftover after free space in main list
+            //inserting leftover after free_space in main list
             leftover->next = free_space->next;
             leftover->prev = free_space;
             free_space->next = leftover;
@@ -202,7 +213,9 @@ void _combineFree(MallocMetadata metadata)
     if (last_free == metadata->next)
         last_free = metadata;
     metadata->next->prev_free = metadata->next->next_free; //removing next from the free list
+    metadata->next->next_free->prev_free = metadata->next->prev_free;
     metadata->next = metadata->next->next; //removing next from the main list
+    metadata->next->next->prev = metadata;
 }
 
 void sfree(void *p){
