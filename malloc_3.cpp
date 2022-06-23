@@ -6,13 +6,13 @@
 #include <string.h>
 
 
-
+//need to make sure size of malloc_meta_data multiplication of 8
 typedef struct malloc_meta_data{
     size_t size;
     //void* pointer; //dropped
     malloc_meta_data* next;
     malloc_meta_data* prev;
-    bool is_free;
+    int is_free;
     malloc_meta_data* next_free;
     malloc_meta_data* prev_free;
 }*MallocMetadata;
@@ -121,6 +121,7 @@ void* smalloc(size_t size) {
     if(size == 0 || size > 100000000){
         return nullptr;
     }
+    size = !(size%8) ? size : size + 8 - size%8;//make size a multiplication of 8
     MallocMetadata free_space = findFreeSpace(size);
     if(free_space != nullptr){
         MallocMetadata leftover = _splitBlock(free_space, size);
@@ -136,14 +137,14 @@ void* smalloc(size_t size) {
             number_of_free_bytes -= sizeof(malloc_meta_data);
             number_of_allocated_blocks += 1; //pretty sure need this
             number_of_allocated_bytes -= sizeof(malloc_meta_data);
-            leftover->is_free = true;
+            leftover->is_free = 1;
         }
         else
         {
             number_of_free_blocks--;
         }
         number_of_free_bytes -= free_space->size;
-        free_space->is_free = false;
+        free_space->is_free = 0;
         return (void*) (size_t(free_space)+ sizeof(malloc_meta_data));
     }
 
@@ -155,7 +156,7 @@ void* smalloc(size_t size) {
             return nullptr;
         }
         last_free = last_free->prev_free;
-        last->is_free = false;
+        last->is_free = 0;
         return (void *) ((size_t)last + sizeof(malloc_meta_data));
     }
 
@@ -166,7 +167,7 @@ void* smalloc(size_t size) {
     MallocMetadata metadata = MallocMetadata(alloc_space);
     void* pointer = (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
     metadata->size = size;
-    metadata->is_free = false;
+    metadata->is_free = 0;
     //metadata->pointer = pointer;
     metadata->next = nullptr;
     metadata->prev = nullptr;
