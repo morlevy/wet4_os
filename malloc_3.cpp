@@ -4,7 +4,9 @@
 
 #include <unistd.h>
 #include <string.h>
+#include <sys/mman.h>
 
+#define MMAP_SIZE 128*1024
 
 //need to make sure size of malloc_meta_data multiplication of 8
 typedef struct malloc_meta_data{
@@ -149,6 +151,7 @@ void* smalloc(size_t size) {
     }
 
     //check wilderness block case
+    //won't check mmap with this case
     if (last && last->is_free)
     {
         void* alloc_space = sbrk(size - last->size);
@@ -159,8 +162,17 @@ void* smalloc(size_t size) {
         last->is_free = 0;
         return (void *) ((size_t)last + sizeof(malloc_meta_data));
     }
-
-    void* alloc_space = sbrk(sizeof(malloc_meta_data) + size);
+    void* alloc_space;
+    if (size >= MMAP_SIZE)
+    {
+        alloc_space = mmap(NULL, size + sizeof(malloc_meta_data), PROT_READ | PROT_WRITE, MAP_SHARED, -1, 0);
+        if (alloc_space == (void*) -1) {
+            return nullptr;
+        }
+        return (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
+    }
+    else
+        alloc_space = sbrk(sizeof(malloc_meta_data) + size);
     if (alloc_space == (void*) -1) {
         return nullptr;
     }
@@ -226,11 +238,20 @@ void sfree(void *p){
 
     MallocMetadata found = findMetaData(p); //why not p - sizeof(malloc_meta_data)?
 
-    if(found != nullptr){
+    if(found != nullptr && !found->is_free){
+        if (found->size >= MMAP_SIZE)
+        {
+            munmap(found, found->size + sizeof(malloc_meta_data));
+            return;
+        }
         if (found->next && found->next->is_free)
+        {
             _combineFree(found);
+        }
         if (found->prev && found->prev->is_free)
+        {
             _combineFree(found->prev);
+        }
         number_of_free_blocks++;
         number_of_free_bytes += found->size;
     }
@@ -250,7 +271,121 @@ void* srealloc(void* oldp, size_t size){
         //old->size = size; //not sure about this line :: memory loss
         return oldp;
     }
+    size = !(size%8) ? size : size + 8 - size%8;
+    //if it's a mmap allocated block, then we simply allocate a new block
+    if (old->size >= MMAP_SIZE)
+    {
+        munmap(old, old->size);
+        int alloc_space = mmap(NULL, size + sizeof(malloc_meta_data), PROT_READ | PROT_WRITE, MAP_SHARED, -1, 0);
+        if (alloc_space == (void*) -1) {
+            return nullptr;
+        }
+        return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+    }
+    MallocMetadata current = old;
+    //checking if I have a free prev
+    if (old->prev && old->prev_free->is_free)
+    {
+        //if with prev we have enough bytes then merge
+        if (size <= old->size + sizeof(malloc_meta_data) + old->prev->size) {
+            old->prev->size += sizeof(malloc_meta_data) + old->size;
+            old->prev->next = old->next;
+            old->next->prev = old->prev;
+            if (last == old)
+                last = old->prev;
+            _disconnectFreeMetaNode(old->prev);
+            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+        }
+        //if we have a free prev and if we are wilderness then merge and add extra
+        if (last == old)
+        {
+            int difference = size - old->size - sizeof(malloc_meta_data) - old->prev->size;
+            old->prev->size = size;
+            old->prev->next = nullptr;
+            _disconnectFreeMetaNode(old->prev);
+            int alloc_space = sbrk(difference);
+            if (alloc_space == (void*) -1) {
+                return nullptr;
+            }
+            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+        }
+    }
+    //if it's the wilderness block
+    if (current == last)
+    {
+        if (current->size < size)
+        {
+            int difference = size - current->size;
+            difference = !(difference%8) ? difference : difference + 8 - difference%8;
+            int alloc_space = sbrk(difference);
+            if (alloc_space == (void*) -1) {
+                return nullptr;
+            }
+            current->size = size;
+            return (void *) (size_t)(current) + sizeof(malloc_meta_data);
+        }
+    }
+    //now check if next block is free and merge if so
+    if (old->next->is_free)
+    {
+        //if with next we have enough bytes then merge
+        if (size <= old->size + sizeof(malloc_meta_data) + old->next->size) {
+            old->size += sizeof(malloc_meta_data) + old->next->size;
+            old->next = old->next->next;
+            if (old->next->next)
+            {
+                old->next->next->prev = old;
+            }
+            _disconnectFreeMetaNode(old->next);
 
+            if (last == old->next)
+                last = old;
+            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+        }
+        //try merging all 3 neighbors
+        if (old->prev && old->prev->is_free)
+        {
+            if (size <= old->size + 2*sizeof(malloc_meta_data) + old->prev->size + old->next->size)
+            {
+                old->prev->size += 2*sizeof(malloc_meta_data) + old->size + old->next->size;
+                old->prev->next = old->next->next;
+                if (old->next->next)
+                    old->next->next->prev = old->prev;
+                _disconnectFreeMetaNode(old->next);
+                _disconnectFreeMetaNode(old->prev);
+                if (old->next == last)
+                    last = old->prev;
+                return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+            }
+
+            //if we have both neighbors free and next is the wilderness - merge and enlarge it
+            if (old->next == last)
+            {
+                void* alloc_space = sbrk(size - old->size - old->next->size - old->prev->size - 2* sizeof(malloc_meta_data));
+                if (alloc_space == (void*) -1) {
+                    return nullptr;
+                }
+                last = old->prev;
+                old->prev->next = nullptr;
+                old->prev->size = size;
+                return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+            }
+        }
+
+        //now we merge only with next block if it's last
+        if (old->next == last)
+        {
+            void* alloc_space = sbrk(size - old->size - old->next->size - sizeof(malloc_meta_data));
+            if (alloc_space == (void*) -1) {
+                return nullptr;
+            }
+            last = old;
+            old->size = size;
+            old->next = nullptr;
+            return (void *) (size_t)(old) + sizeof(malloc_meta_data);
+        }
+    }
+    old->is_free = 1;
     void* new_p = smalloc(size);
     if(new_p != nullptr){
         memcpy(new_p,oldp,old->size);
