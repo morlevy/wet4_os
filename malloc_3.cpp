@@ -344,6 +344,8 @@ void* srealloc(void* oldp, size_t size){
     MallocMetadata old = MallocMetadata ((size_t)oldp - sizeof(malloc_meta_data));//findMetaData(oldp);
     if (old->size == size)
         return oldp;
+    size_t min = old->size > size ? size : old->size;
+
     if (old->size >= size){
         //old->size = size; //not sure about this line :: memory loss
         int res = old->size - size - sizeof(malloc_meta_data);
@@ -406,8 +408,8 @@ void* srealloc(void* oldp, size_t size){
             _disconnectFreeMetaNode(old->prev);
             old->prev->is_free = 0;
             //copy previous old data into old->prev
-            size_t min = old->size > size ? size : old->size;
-            memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+
+            memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
             //if after the merge we will have a splittable block then split it
             if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
             {
@@ -452,8 +454,8 @@ void* srealloc(void* oldp, size_t size){
             if (alloc_space == (void*) -1) {
                 return nullptr;
             }
-            size_t min = old->size > size ? size : old->size;
-            memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+
+            memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
             return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
     }
@@ -536,8 +538,8 @@ void* srealloc(void* oldp, size_t size){
                 _disconnectFreeMetaNode(old->prev);
                 if (old->next == last)
                     last = old->prev;
-                size_t min = old->size > size ? size : old->size;
-                memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+
+                memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
                 //if can split after merge, split!
                 if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
                 {
@@ -576,8 +578,8 @@ void* srealloc(void* oldp, size_t size){
                 last = old->prev;
                 old->prev->next = nullptr;
                 old->prev->size = size;
-                size_t min = old->size > size ? size : old->size;
-                memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+
+                memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
                 return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
         }
@@ -601,7 +603,7 @@ void* srealloc(void* oldp, size_t size){
     }
     void* new_p = smalloc(size);
     if(new_p != nullptr){
-        memcpy(new_p,oldp,old->size);
+        memmove(new_p,oldp,old->size);
         sfree(oldp);
     }
     return new_p;
