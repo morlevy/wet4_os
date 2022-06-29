@@ -65,7 +65,7 @@ void _insertFree(MallocMetadata metadata)
         MallocMetadata temp = first_free;
         while (temp) //checking if we can insert it sorted
         {
-            if (temp->size > metadata->size) //we only insert if the next node has a bigger size/
+            if (temp->size > metadata->size || (temp->size == metadata->size && (size_t)temp > (size_t)metadata)) //we only insert if the next node has a bigger size or if we are the same and smaller address
             {
                 if (temp == first_free)
                 {
@@ -142,6 +142,9 @@ void* smalloc(size_t size) {
     if(size == 0 || size > 100000000){
         return nullptr;
     }
+    void* base = sbrk(0);
+    if ((size_t)base % 8)
+        sbrk(8-((size_t)base%8));
     size = !(size%8) ? size : size + 8 - size%8;//make size a multiplication of 8
     if (size >= MMAP_SIZE)
     {
@@ -178,6 +181,8 @@ void* smalloc(size_t size) {
         }
         number_of_free_bytes -= free_space->size;
         free_space->is_free = 0;
+        free_space->next_free = nullptr;
+        free_space->prev_free = nullptr;
         return (void*) (size_t(free_space)+ sizeof(malloc_meta_data));
     }
 
@@ -279,10 +284,7 @@ void sfree(void *p){
     }
 
     MallocMetadata found = MallocMetadata ((size_t)p - sizeof(malloc_meta_data));// findMetaData(p); //why not p - sizeof(malloc_meta_data)?
-    if (found)
-        printf("found size is: %d", (int)found->size);
-    else
-        printf("whattt?????");
+
     if(found != nullptr && !found->is_free){
         if (found->size >= MMAP_SIZE)
         {
@@ -310,6 +312,27 @@ void sfree(void *p){
     }
 }
 
+void _mergeWithNextFree(MallocMetadata new_block)
+{
+//if after split, we now have 2 free blocks after us, merge them!
+    _disconnectFreeMetaNode(new_block->next);
+    new_block->size+=new_block->next->size + sizeof(malloc_meta_data);
+    number_of_allocated_bytes+= sizeof(malloc_meta_data);
+    number_of_allocated_blocks--;
+    number_of_free_bytes+= sizeof(malloc_meta_data);
+    number_of_free_blocks--;
+    if (new_block->next==last)
+    {
+    last = new_block;
+    new_block->next = nullptr;
+    }
+    else
+    {
+    new_block->next = new_block->next->next;
+    new_block->next->next->prev = new_block;
+    }
+}
+
 void* srealloc(void* oldp, size_t size){
     if (size == 0 || size > 100000000){
         return nullptr;
@@ -318,10 +341,32 @@ void* srealloc(void* oldp, size_t size){
     if(oldp == nullptr){
         return smalloc(size);
     }
-
     MallocMetadata old = MallocMetadata ((size_t)oldp - sizeof(malloc_meta_data));//findMetaData(oldp);
+    if (old->size == size)
+        return oldp;
     if (old->size >= size){
         //old->size = size; //not sure about this line :: memory loss
+        int res = old->size - size - sizeof(malloc_meta_data);
+        if (res >= 128)
+        {
+            //new block will start after old->prev block now finished.
+            MallocMetadata new_block = MallocMetadata ((size_t) old + sizeof(malloc_meta_data) + size);
+            new_block->size = old->size - size - sizeof(malloc_meta_data);
+            old->size = size;
+            number_of_allocated_bytes -= sizeof(malloc_meta_data);
+            number_of_allocated_blocks++;
+            number_of_free_bytes+=new_block->size;// - sizeof(malloc_meta_data);
+            number_of_free_blocks++;
+            new_block->next = old->next;
+            new_block->prev = old;
+            old->next = new_block;
+            if (last == old)
+                last = new_block;
+            else
+                new_block->next->prev = new_block;
+            new_block->is_free=1;
+            _insertFree(new_block);
+        }
         return oldp;
     }
     size = !(size%8) ? size : size + 8 - size%8;
@@ -344,7 +389,7 @@ void* srealloc(void* oldp, size_t size){
     }
     MallocMetadata current = old;
     //checking if I have a free prev
-    if (old->prev && old->prev_free->is_free)
+    if (old->prev && old->prev->is_free)
     {
         //if with prev we have enough bytes then merge
         if (size <= old->size + sizeof(malloc_meta_data) + old->prev->size) {
@@ -354,20 +399,25 @@ void* srealloc(void* oldp, size_t size){
             number_of_allocated_bytes += sizeof(malloc_meta_data);
             old->prev->size += sizeof(malloc_meta_data) + old->size;
             old->prev->next = old->next;
-            old->next->prev = old->prev;
             if (last == old)
                 last = old->prev;
+            else
+                old->next->prev = old->prev;
             _disconnectFreeMetaNode(old->prev);
-            //if after the split we will have a splittable block then split it
-            if (old->prev->size - size - sizeof(malloc_meta_data)>= 128)
+            old->prev->is_free = 0;
+            //copy previous old data into old->prev
+            size_t min = old->size > size ? size : old->size;
+            memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+            //if after the merge we will have a splittable block then split it
+            if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
             {
                 //new block will start after old->prev block now finished.
                 MallocMetadata new_block = MallocMetadata ((size_t) old->prev + sizeof(malloc_meta_data) + size);
                 new_block->size = old->prev->size - size - sizeof(malloc_meta_data);
-                old->prev->size -= new_block->size - sizeof(malloc_meta_data);
+                old->prev->size -= (new_block->size + sizeof(malloc_meta_data));
                 number_of_allocated_bytes-= sizeof(malloc_meta_data);
                 number_of_allocated_blocks++;
-                number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                number_of_free_bytes+=new_block->size;// - sizeof(malloc_meta_data);//check later
                 number_of_free_blocks++;
                 new_block->next = old->prev->next;
                 new_block->prev = old->prev;
@@ -376,6 +426,13 @@ void* srealloc(void* oldp, size_t size){
                     last = new_block;
                 else
                     new_block->next->prev = new_block;
+                new_block->is_free = 1;
+                _insertFree(new_block);
+                //if after split, we now have 2 free blocks after us, merge them!
+                if (new_block->next && new_block->next->is_free)
+                {
+                    _mergeWithNextFree(new_block);
+                }
             }
             return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
@@ -390,10 +447,13 @@ void* srealloc(void* oldp, size_t size){
             old->prev->size = size;
             old->prev->next = nullptr;
             _disconnectFreeMetaNode(old->prev);
+            old->prev->is_free = 0;
             void* alloc_space = sbrk(difference);
             if (alloc_space == (void*) -1) {
                 return nullptr;
             }
+            size_t min = old->size > size ? size : old->size;
+            memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
             return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
     }
@@ -414,29 +474,33 @@ void* srealloc(void* oldp, size_t size){
         }
     }
     //now check if next block is free and merge if so
-    if (old->next->is_free)
+    if (old->next && old->next->is_free)
     {
         //if with next we have enough bytes then merge
         if (size <= old->size + sizeof(malloc_meta_data) + old->next->size) {
             old->size += sizeof(malloc_meta_data) + old->next->size;
-            old->next = old->next->next;
-            if (old->next->next)
-            {
-                old->next->next->prev = old;
-            }
+            number_of_free_bytes -= old->next->size;
+            number_of_allocated_blocks--;
+            number_of_free_blocks--;
+            number_of_allocated_bytes += sizeof(malloc_meta_data);
             _disconnectFreeMetaNode(old->next);
-
             if (last == old->next)
                 last = old;
-            if (old->size - size - sizeof(malloc_meta_data)>= 128)
+            old->next = old->next->next;
+            if (old->next)
+            {
+                old->next->prev = old;
+            }
+
+            if ((int)(old->size - size - sizeof(malloc_meta_data))>= 128)
             {
                 //new block will start after old block now finished.
                 MallocMetadata new_block = MallocMetadata ((size_t) old + sizeof(malloc_meta_data) + size);
                 new_block->size = old->size - size - sizeof(malloc_meta_data);
-                old->size -= new_block->size - sizeof(malloc_meta_data); //should be equal size
+                old->size -= (new_block->size + sizeof(malloc_meta_data)); //should be equal size
                 number_of_allocated_bytes-= sizeof(malloc_meta_data);
                 number_of_allocated_blocks++;
-                number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                number_of_free_bytes+=new_block->size;// - sizeof(malloc_meta_data);
                 number_of_free_blocks++;
                 new_block->next = old->next;
                 new_block->prev = old;
@@ -445,14 +509,25 @@ void* srealloc(void* oldp, size_t size){
                     last = new_block;
                 else
                     new_block->next->prev = new_block;
+                new_block->is_free=1;
+                _insertFree(new_block);
+                //if after split, we now have 2 free blocks after us, merge them!
+                if (new_block->next && new_block->next->is_free)
+                {
+                    _mergeWithNextFree(new_block);
+                }
             }
-            return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
+            return (void *) ((size_t)(old) + sizeof(malloc_meta_data));
         }
         //try merging all 3 neighbors
         if (old->prev && old->prev->is_free)
         {
             if (size <= old->size + 2*sizeof(malloc_meta_data) + old->prev->size + old->next->size)
             {
+                number_of_allocated_bytes+= 2*sizeof(malloc_meta_data);
+                number_of_allocated_blocks-=2;
+                number_of_free_bytes -= (int)(old->prev->size+old->next->size);
+                number_of_free_blocks-=2;
                 old->prev->size += 2*sizeof(malloc_meta_data) + old->size + old->next->size;
                 old->prev->next = old->next->next;
                 if (old->next->next)
@@ -461,15 +536,18 @@ void* srealloc(void* oldp, size_t size){
                 _disconnectFreeMetaNode(old->prev);
                 if (old->next == last)
                     last = old->prev;
-                if (old->prev->size - size - sizeof(malloc_meta_data)>= 128)
+                size_t min = old->size > size ? size : old->size;
+                memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
+                //if can split after merge, split!
+                if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
                 {
                     //new block will start after old->prev block now finished.
                     MallocMetadata new_block = MallocMetadata ((size_t) old->prev + sizeof(malloc_meta_data) + size);
                     new_block->size = old->prev->size - size - sizeof(malloc_meta_data);
-                    old->prev->size -= new_block->size - sizeof(malloc_meta_data);
+                    old->prev->size -= (new_block->size + sizeof(malloc_meta_data));
                     number_of_allocated_bytes-= sizeof(malloc_meta_data);
                     number_of_allocated_blocks++;
-                    number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                    number_of_free_bytes+=new_block->size;// - sizeof(malloc_meta_data);
                     number_of_free_blocks++;
                     new_block->next = old->prev->next;
                     new_block->prev = old->prev;
@@ -478,6 +556,8 @@ void* srealloc(void* oldp, size_t size){
                         last = new_block;
                     else
                         new_block->next->prev = new_block;
+                    _insertFree(new_block);
+                    new_block->is_free = 1;
                 }
                 return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
@@ -489,9 +569,15 @@ void* srealloc(void* oldp, size_t size){
                 if (alloc_space == (void*) -1) {
                     return nullptr;
                 }
+                number_of_allocated_bytes+= (2* sizeof(malloc_meta_data) + size - old->size - old->next->size - old->prev->size - 2* sizeof(malloc_meta_data));
+                number_of_allocated_blocks-=2;
+                number_of_free_bytes-=(old->next->size+old->prev->size);
+                number_of_free_blocks-=2;
                 last = old->prev;
                 old->prev->next = nullptr;
                 old->prev->size = size;
+                size_t min = old->size > size ? size : old->size;
+                memcpy(old->prev + sizeof(malloc_meta_data),oldp,min);
                 return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
         }
@@ -504,6 +590,10 @@ void* srealloc(void* oldp, size_t size){
                 return nullptr;
             }
             last = old;
+            number_of_allocated_bytes+= sizeof(malloc_meta_data)+size - old->size - old->next->size - sizeof(malloc_meta_data);
+            number_of_allocated_blocks--;
+            number_of_free_bytes-=old->next->size;
+            number_of_free_blocks--;
             old->size = size;
             old->next = nullptr;
             return (void *) ((size_t)(old) + sizeof(malloc_meta_data));
