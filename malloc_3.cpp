@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/mman.h>
-
+#include <stdio.h>
 #define MMAP_SIZE 128*1024
 
 //need to make sure size of malloc_meta_data multiplication of 8
@@ -67,12 +67,20 @@ void _insertFree(MallocMetadata metadata)
         {
             if (temp->size > metadata->size) //we only insert if the next node has a bigger size/
             {
+                if (temp == first_free)
+                {
+                    first_free = metadata;
+                    metadata->next_free = temp;
+                    temp->prev_free = metadata;
+                    return;
+                }
                 temp->prev_free->next_free = metadata;
                 metadata->next_free = temp;
                 metadata->prev_free = temp->prev_free;
                 temp->prev_free = metadata;
-                break;
+                return;
             }
+            temp = temp->next_free;
         }
         if (!(metadata->next_free)) //if it should be last by size and address.
         {
@@ -91,7 +99,7 @@ MallocMetadata _splitBlock(MallocMetadata freeBlock, size_t size)
     if ((freeBlock->size < size + 128 + sizeof(malloc_meta_data))) //if not big enough return null
         return result;
 
-    result = (size_t)freeBlock + sizeof(malloc_meta_data) + size; //getting the start of the other part of the block
+    result = MallocMetadata ((size_t)freeBlock + sizeof(malloc_meta_data) + size); //getting the start of the other part of the block
     result->size = freeBlock->size - size - sizeof(malloc_meta_data); //result->size MUST be larger than 128!
     result->next = nullptr;
     result->prev = nullptr;
@@ -107,10 +115,21 @@ void _disconnectFreeMetaNode(MallocMetadata metadata)
         return;
     if (metadata == first_free || metadata == last_free)
     {
-        if (metadata == first_free)
-            first_free = metadata->next_free ? metadata->next_free : nullptr;
-        if (metadata == last_free)
-            last_free = metadata->prev_free ? metadata->prev_free : nullptr;
+        if (metadata == first_free && metadata == last_free)
+        {
+            first_free = nullptr;
+            last_free = nullptr;
+        }
+        else {
+            if (metadata == first_free) {
+                first_free = metadata->next_free ? metadata->next_free : nullptr;
+                first_free->prev_free = nullptr;
+            }
+            if (metadata == last_free) {
+                last_free = metadata->prev_free ? metadata->prev_free : nullptr;
+                last_free->next_free = nullptr;
+            }
+        }
     }
     else
     {
@@ -124,18 +143,30 @@ void* smalloc(size_t size) {
         return nullptr;
     }
     size = !(size%8) ? size : size + 8 - size%8;//make size a multiplication of 8
+    if (size >= MMAP_SIZE)
+    {
+        void* alloc_space = mmap(NULL,size + sizeof(malloc_meta_data),PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (alloc_space == (void*) -1) {
+            return nullptr;
+        }
+        number_of_allocated_blocks++;
+        number_of_allocated_bytes+=size;
+        ((struct malloc_meta_data *)(alloc_space))->is_free = 0;
+        ((struct malloc_meta_data *)(alloc_space))->size = size;
+        return (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
+    }
     MallocMetadata free_space = findFreeSpace(size);
     if(free_space != nullptr){
         MallocMetadata leftover = _splitBlock(free_space, size);
+        _disconnectFreeMetaNode(free_space);
         if (leftover)
         {
-            _disconnectFreeMetaNode(free_space);
             _insertFree(leftover);
             //inserting leftover after free_space in main list
             leftover->next = free_space->next;
             leftover->prev = free_space;
             free_space->next = leftover;
-
+            free_space->size = size;
             number_of_free_bytes -= sizeof(malloc_meta_data);
             number_of_allocated_blocks += 1; //pretty sure need this
             number_of_allocated_bytes -= sizeof(malloc_meta_data);
@@ -158,17 +189,26 @@ void* smalloc(size_t size) {
         if (alloc_space == (void*) -1) {
             return nullptr;
         }
-        last_free = last_free->prev_free;
+        //last_free = last_free->prev_free;
+        _disconnectFreeMetaNode(last_free);
+        number_of_free_bytes -= last->size;
+        number_of_free_blocks--;
+        number_of_allocated_bytes+= ((int)size - (int)last->size);
+        last->size = size;
         last->is_free = 0;
         return (void *) ((size_t)last + sizeof(malloc_meta_data));
     }
     void* alloc_space;
     if (size >= MMAP_SIZE)
     {
-        alloc_space = mmap(NULL, size + sizeof(malloc_meta_data), PROT_READ | PROT_WRITE, MAP_SHARED, -1, 0);
+        alloc_space = mmap(NULL,size + sizeof(malloc_meta_data),PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (alloc_space == (void*) -1) {
             return nullptr;
         }
+        number_of_allocated_blocks++;
+        number_of_allocated_bytes+=size;
+        ((struct malloc_meta_data *)(alloc_space))->size = size;
+        ((struct malloc_meta_data *)(alloc_space))->is_free = 0;
         return (void*) ((size_t)alloc_space + sizeof(malloc_meta_data));
     }
     else
@@ -216,19 +256,21 @@ void _combineFree(MallocMetadata metadata)
     if (!metadata || !metadata->next || !metadata->next->is_free)
         return;
     //now combine
-    metadata->size += metadata->next->size + sizeof(metadata);
+    metadata->size += metadata->next->size + sizeof(malloc_meta_data);
     number_of_allocated_blocks--;
-    number_of_free_bytes += sizeof(metadata);
-    number_of_allocated_bytes += sizeof (metadata);
+    number_of_free_bytes += sizeof(malloc_meta_data);
+    number_of_allocated_bytes += sizeof(malloc_meta_data);
     number_of_free_blocks--;
     if (last == metadata->next)
         last = metadata;
-    if (last_free == metadata->next)
-        last_free = metadata;
-    metadata->next->prev_free = metadata->next->next_free; //removing next from the free list
-    metadata->next->next_free->prev_free = metadata->next->prev_free;
+    //if (last_free == metadata->next)
+    //    last_free = metadata;
+
+    _disconnectFreeMetaNode(metadata->next);
+
     metadata->next = metadata->next->next; //removing next from the main list
-    metadata->next->next->prev = metadata;
+    if (metadata->next)
+        metadata->next->prev = metadata;
 }
 
 void sfree(void *p){
@@ -236,14 +278,26 @@ void sfree(void *p){
         return;
     }
 
-    MallocMetadata found = findMetaData(p); //why not p - sizeof(malloc_meta_data)?
-
+    MallocMetadata found = MallocMetadata ((size_t)p - sizeof(malloc_meta_data));// findMetaData(p); //why not p - sizeof(malloc_meta_data)?
+    if (found)
+        printf("found size is: %d", (int)found->size);
+    else
+        printf("whattt?????");
     if(found != nullptr && !found->is_free){
         if (found->size >= MMAP_SIZE)
         {
-            munmap(found, found->size + sizeof(malloc_meta_data));
+            int found_size = found->size;
+            int err = munmap(found, found->size + sizeof(malloc_meta_data));
+            if (err)
+                return;
+            number_of_allocated_blocks--;
+            number_of_allocated_bytes-=found_size;
             return;
         }
+        found->is_free=1;
+        number_of_free_blocks++;
+        number_of_free_bytes += found->size;
+        _insertFree(found);
         if (found->next && found->next->is_free)
         {
             _combineFree(found);
@@ -252,8 +306,7 @@ void sfree(void *p){
         {
             _combineFree(found->prev);
         }
-        number_of_free_blocks++;
-        number_of_free_bytes += found->size;
+
     }
 }
 
@@ -266,7 +319,7 @@ void* srealloc(void* oldp, size_t size){
         return smalloc(size);
     }
 
-    MallocMetadata old = findMetaData(oldp);
+    MallocMetadata old = MallocMetadata ((size_t)oldp - sizeof(malloc_meta_data));//findMetaData(oldp);
     if (old->size >= size){
         //old->size = size; //not sure about this line :: memory loss
         return oldp;
@@ -275,12 +328,19 @@ void* srealloc(void* oldp, size_t size){
     //if it's a mmap allocated block, then we simply allocate a new block
     if (old->size >= MMAP_SIZE)
     {
-        munmap(old, old->size);
-        int alloc_space = mmap(NULL, size + sizeof(malloc_meta_data), PROT_READ | PROT_WRITE, MAP_SHARED, -1, 0);
+        int old_size = old->size;
+        int res = munmap(old, old->size);
+        if (res)
+            return nullptr;
+        void* alloc_space = mmap(NULL,size + sizeof(malloc_meta_data),PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (alloc_space == (void*) -1) {
             return nullptr;
         }
-        return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+        number_of_allocated_bytes += size - size-old_size;
+        ((struct malloc_meta_data *)(alloc_space))->is_free = 0;
+        ((struct malloc_meta_data *)(alloc_space))->size = size;
+
+        return (void *) ((size_t)(alloc_space) + sizeof(malloc_meta_data));
     }
     MallocMetadata current = old;
     //checking if I have a free prev
@@ -288,26 +348,53 @@ void* srealloc(void* oldp, size_t size){
     {
         //if with prev we have enough bytes then merge
         if (size <= old->size + sizeof(malloc_meta_data) + old->prev->size) {
+            number_of_free_bytes -= old->prev->size;
+            number_of_allocated_blocks--;
+            number_of_free_blocks--;
+            number_of_allocated_bytes += sizeof(malloc_meta_data);
             old->prev->size += sizeof(malloc_meta_data) + old->size;
             old->prev->next = old->next;
             old->next->prev = old->prev;
             if (last == old)
                 last = old->prev;
             _disconnectFreeMetaNode(old->prev);
-            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+            //if after the split we will have a splittable block then split it
+            if (old->prev->size - size - sizeof(malloc_meta_data)>= 128)
+            {
+                //new block will start after old->prev block now finished.
+                MallocMetadata new_block = MallocMetadata ((size_t) old->prev + sizeof(malloc_meta_data) + size);
+                new_block->size = old->prev->size - size - sizeof(malloc_meta_data);
+                old->prev->size -= new_block->size - sizeof(malloc_meta_data);
+                number_of_allocated_bytes-= sizeof(malloc_meta_data);
+                number_of_allocated_blocks++;
+                number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                number_of_free_blocks++;
+                new_block->next = old->prev->next;
+                new_block->prev = old->prev;
+                old->prev->next = new_block;
+                if (last == old->prev)
+                    last = new_block;
+                else
+                    new_block->next->prev = new_block;
+            }
+            return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
         //if we have a free prev and if we are wilderness then merge and add extra
         if (last == old)
         {
             int difference = size - old->size - sizeof(malloc_meta_data) - old->prev->size;
+            number_of_free_bytes -= old->prev->size;
+            number_of_allocated_blocks--;
+            number_of_free_blocks--;
+            number_of_allocated_bytes += sizeof(malloc_meta_data) + difference;
             old->prev->size = size;
             old->prev->next = nullptr;
             _disconnectFreeMetaNode(old->prev);
-            int alloc_space = sbrk(difference);
+            void* alloc_space = sbrk(difference);
             if (alloc_space == (void*) -1) {
                 return nullptr;
             }
-            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+            return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
     }
     //if it's the wilderness block
@@ -317,12 +404,13 @@ void* srealloc(void* oldp, size_t size){
         {
             int difference = size - current->size;
             difference = !(difference%8) ? difference : difference + 8 - difference%8;
-            int alloc_space = sbrk(difference);
+            void* alloc_space = sbrk(difference);
             if (alloc_space == (void*) -1) {
                 return nullptr;
             }
+            number_of_allocated_bytes += difference;
             current->size = size;
-            return (void *) (size_t)(current) + sizeof(malloc_meta_data);
+            return (void *) ((size_t)(current) + sizeof(malloc_meta_data));
         }
     }
     //now check if next block is free and merge if so
@@ -340,7 +428,25 @@ void* srealloc(void* oldp, size_t size){
 
             if (last == old->next)
                 last = old;
-            return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+            if (old->size - size - sizeof(malloc_meta_data)>= 128)
+            {
+                //new block will start after old block now finished.
+                MallocMetadata new_block = MallocMetadata ((size_t) old + sizeof(malloc_meta_data) + size);
+                new_block->size = old->size - size - sizeof(malloc_meta_data);
+                old->size -= new_block->size - sizeof(malloc_meta_data); //should be equal size
+                number_of_allocated_bytes-= sizeof(malloc_meta_data);
+                number_of_allocated_blocks++;
+                number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                number_of_free_blocks++;
+                new_block->next = old->next;
+                new_block->prev = old;
+                old->next = new_block;
+                if (last == old)
+                    last = new_block;
+                else
+                    new_block->next->prev = new_block;
+            }
+            return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
         //try merging all 3 neighbors
         if (old->prev && old->prev->is_free)
@@ -355,7 +461,25 @@ void* srealloc(void* oldp, size_t size){
                 _disconnectFreeMetaNode(old->prev);
                 if (old->next == last)
                     last = old->prev;
-                return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+                if (old->prev->size - size - sizeof(malloc_meta_data)>= 128)
+                {
+                    //new block will start after old->prev block now finished.
+                    MallocMetadata new_block = MallocMetadata ((size_t) old->prev + sizeof(malloc_meta_data) + size);
+                    new_block->size = old->prev->size - size - sizeof(malloc_meta_data);
+                    old->prev->size -= new_block->size - sizeof(malloc_meta_data);
+                    number_of_allocated_bytes-= sizeof(malloc_meta_data);
+                    number_of_allocated_blocks++;
+                    number_of_free_bytes+=new_block->size - sizeof(malloc_meta_data);
+                    number_of_free_blocks++;
+                    new_block->next = old->prev->next;
+                    new_block->prev = old->prev;
+                    old->prev->next = new_block;
+                    if (last == old->prev)
+                        last = new_block;
+                    else
+                        new_block->next->prev = new_block;
+                }
+                return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
 
             //if we have both neighbors free and next is the wilderness - merge and enlarge it
@@ -368,7 +492,7 @@ void* srealloc(void* oldp, size_t size){
                 last = old->prev;
                 old->prev->next = nullptr;
                 old->prev->size = size;
-                return (void *) (size_t)(old->prev) + sizeof(malloc_meta_data);
+                return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
         }
 
@@ -382,10 +506,9 @@ void* srealloc(void* oldp, size_t size){
             last = old;
             old->size = size;
             old->next = nullptr;
-            return (void *) (size_t)(old) + sizeof(malloc_meta_data);
+            return (void *) ((size_t)(old) + sizeof(malloc_meta_data));
         }
     }
-    old->is_free = 1;
     void* new_p = smalloc(size);
     if(new_p != nullptr){
         memcpy(new_p,oldp,old->size);
