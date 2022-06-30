@@ -395,6 +395,7 @@ void* srealloc(void* oldp, size_t size){
     {
         //if with prev we have enough bytes then merge
         if (size <= old->size + sizeof(malloc_meta_data) + old->prev->size) {
+            memmove((void*)((size_t)(old->prev) + sizeof(malloc_meta_data)),oldp,min);
             number_of_free_bytes -= old->prev->size;
             number_of_allocated_blocks--;
             number_of_free_blocks--;
@@ -409,7 +410,6 @@ void* srealloc(void* oldp, size_t size){
             old->prev->is_free = 0;
             //copy previous old data into old->prev
 
-            memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
             //if after the merge we will have a splittable block then split it
             if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
             {
@@ -441,6 +441,7 @@ void* srealloc(void* oldp, size_t size){
         //if we have a free prev and if we are wilderness then merge and add extra
         if (last == old)
         {
+            memmove((void*)((size_t)(old->prev) + sizeof(malloc_meta_data)),oldp,min);
             int difference = size - old->size - sizeof(malloc_meta_data) - old->prev->size;
             number_of_free_bytes -= old->prev->size;
             number_of_allocated_blocks--;
@@ -455,7 +456,6 @@ void* srealloc(void* oldp, size_t size){
                 return nullptr;
             }
 
-            memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
             return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
         }
     }
@@ -526,6 +526,7 @@ void* srealloc(void* oldp, size_t size){
         {
             if (size <= old->size + 2*sizeof(malloc_meta_data) + old->prev->size + old->next->size)
             {
+                memmove((void*)((size_t)(old->prev) + sizeof(malloc_meta_data)),oldp,min);
                 number_of_allocated_bytes+= 2*sizeof(malloc_meta_data);
                 number_of_allocated_blocks-=2;
                 number_of_free_bytes -= (int)(old->prev->size+old->next->size);
@@ -536,10 +537,10 @@ void* srealloc(void* oldp, size_t size){
                     old->next->next->prev = old->prev;
                 _disconnectFreeMetaNode(old->next);
                 _disconnectFreeMetaNode(old->prev);
+                old->prev->is_free = 0;
                 if (old->next == last)
                     last = old->prev;
 
-                memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
                 //if can split after merge, split!
                 if ((int)(old->prev->size - size - sizeof(malloc_meta_data))>= 128)
                 {
@@ -567,6 +568,7 @@ void* srealloc(void* oldp, size_t size){
             //if we have both neighbors free and next is the wilderness - merge and enlarge it
             if (old->next == last)
             {
+                memmove((void*)((size_t)(old->prev) + sizeof(malloc_meta_data)),oldp,min);
                 void* alloc_space = sbrk(size - old->size - old->next->size - old->prev->size - 2* sizeof(malloc_meta_data));
                 if (alloc_space == (void*) -1) {
                     return nullptr;
@@ -578,8 +580,7 @@ void* srealloc(void* oldp, size_t size){
                 last = old->prev;
                 old->prev->next = nullptr;
                 old->prev->size = size;
-
-                memmove(old->prev + sizeof(malloc_meta_data),oldp,min);
+                old->prev->is_free = 0;
                 return (void *) ((size_t)(old->prev) + sizeof(malloc_meta_data));
             }
         }
